@@ -3,6 +3,11 @@
 
 var recording = false;
 
+// Turn on screen and keep it on
+Bangle.setLCDPower(1);
+Bangle.setLCDBrightness(1);
+Bangle.setLCDTimeout(0); // never turn off
+
 // Set up BLE service for motion data
 NRF.setServices({
   "12340001-1234-1234-1234-123456789abc": {
@@ -54,24 +59,28 @@ function onAccel(data) {
   });
 }
 
+function showScreen(title, subtitle, color) {
+  g.clear(1);
+  g.setFont("Vector", 24);
+  g.setColor(color[0], color[1], color[2]);
+  g.setFontAlign(0, 0);
+  g.drawString(title, 88, 70);
+  g.setFont("Vector", 16);
+  g.setColor(1, 1, 1);
+  g.drawString(subtitle, 88, 105);
+  g.flip();
+}
+
 // Toggle recording with button press
 function toggleRecording() {
   recording = !recording;
   if (recording) {
     smoothX = 0;
     smoothY = 0;
-    g.clear();
-    g.setFont("6x8", 2);
-    g.setColor(0, 1, 0);
-    g.drawString("RECORDING", 20, 50);
-    g.drawString("Tilt to draw", 10, 80);
+    showScreen("RECORDING", "Tilt to draw", [0, 1, 0]);
     Bangle.buzz(200);
   } else {
-    g.clear();
-    g.setFont("6x8", 2);
-    g.setColor(1, 0, 0);
-    g.drawString("PAUSED", 40, 50);
-    g.drawString("Press BTN", 20, 80);
+    showScreen("PAUSED", "Press BTN", [1, 0, 0]);
     Bangle.buzz(100);
   }
 }
@@ -83,11 +92,4 @@ Bangle.on('accel', onAccel);
 setWatch(toggleRecording, BTN, { repeat: true, edge: "rising" });
 
 // Initial screen
-g.clear();
-g.setFont("6x8", 2);
-g.setColor(1, 1, 1);
-g.drawString("Motion", 30, 30);
-g.drawString("Controller", 15, 55);
-g.setFont("6x8", 1);
-g.drawString("Press button to start", 10, 90);
-g.drawString("Tilt hand to draw", 15, 105);
+showScreen("Motion", "Press button", [1, 1, 1]);
