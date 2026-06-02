@@ -1,5 +1,5 @@
 // Bangle.js Motion Sender
-// This app reads accelerometer data and sends it via BLE to the laptop
+// Sends accelerometer data via built-in Nordic UART (Bluetooth.println)
 
 var recording = false;
 
@@ -7,21 +7,6 @@ var recording = false;
 Bangle.setLCDPower(1);
 Bangle.setLCDBrightness(1);
 Bangle.setLCDTimeout(0); // never turn off
-
-// Set up BLE service for motion data
-NRF.setServices({
-  "12340001-1234-1234-1234-123456789abc": {
-    "12340002-1234-1234-1234-123456789abc": {
-      value: new ArrayBuffer(8),
-      notify: true,
-      readable: true,
-      description: "Motion XY"
-    }
-  }
-}, { uart: false, advertise: ["12340001-1234-1234-1234-123456789abc"] });
-
-// Set advertising name so the web app can find us
-NRF.setAdvertising({}, { name: "BangleMotion" });
 
 // Smoothing filter - prevents jitter
 var smoothX = 0;
@@ -43,20 +28,8 @@ function onAccel(data) {
   var sendX = Math.round(Math.max(-100, Math.min(100, x * 100)));
   var sendY = Math.round(Math.max(-100, Math.min(100, y * 100)));
 
-  // Pack into buffer and notify
-  var buf = new ArrayBuffer(4);
-  var view = new DataView(buf);
-  view.setInt16(0, sendX);
-  view.setInt16(2, sendY);
-
-  NRF.updateServices({
-    "12340001-1234-1234-1234-123456789abc": {
-      "12340002-1234-1234-1234-123456789abc": {
-        value: buf,
-        notify: true
-      }
-    }
-  });
+  // Send via UART as comma-separated values
+  Bluetooth.println(sendX + "," + sendY);
 }
 
 function showScreen(title, subtitle, color) {

@@ -45,26 +45,30 @@ lineWidthSlider.addEventListener('input', () => {
 // BLE CONNECTION
 // ============================================
 
+// Nordic UART Service UUIDs (built into Bangle.js)
+const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const UART_RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // receive from watch
+
 async function connectWatch() {
     try {
         btnConnect.textContent = 'Connecting...';
         btnConnect.disabled = true;
 
-        // Request BLE device with our custom service
+        // Request BLE device with Nordic UART service
         bleDevice = await navigator.bluetooth.requestDevice({
             filters: [{ namePrefix: 'Bangle' }],
-            optionalServices: ['12340001-1234-1234-1234-123456789abc']
+            optionalServices: [UART_SERVICE]
         });
 
         bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
 
         const server = await bleDevice.gatt.connect();
-        const service = await server.getPrimaryService('12340001-1234-1234-1234-123456789abc');
-        bleCharacteristic = await service.getCharacteristic('12340002-1234-1234-1234-123456789abc');
+        const service = await server.getPrimaryService(UART_SERVICE);
+        bleCharacteristic = await service.getCharacteristic(UART_RX);
 
         // Subscribe to notifications
         await bleCharacteristic.startNotifications();
-        bleCharacteristic.addEventListener('characteristicvaluechanged', onMotionData);
+        bleCharacteristic.addEventListener('characteristicvaluechanged', onUartData);
 
         // Update UI
         document.getElementById('bleStatus').className = 'status-dot dot-green';
@@ -97,10 +101,29 @@ function onDisconnected() {
 // MOTION DATA HANDLING
 // ============================================
 
-function onMotionData(event) {
+// Buffer for incoming UART data (may arrive in chunks)
+let uartBuffer = '';
+
+function onUartData(event) {
     const data = event.target.value;
-    const tiltX = data.getInt16(0);
-    const tiltY = data.getInt16(2);
+    const text = new TextDecoder().decode(data);
+    uartBuffer += text;
+
+    // Process complete lines
+    const lines = uartBuffer.split('\n');
+    uartBuffer = lines.pop(); // keep incomplete line in buffer
+
+    for (const line of lines) {
+        const parts = line.trim().split(',');
+        if (parts.length !== 2) continue;
+        const tiltX = parseInt(parts[0]);
+        const tiltY = parseInt(parts[1]);
+        if (isNaN(tiltX) || isNaN(tiltY)) continue;
+        processMotionData(tiltX, tiltY);
+    }
+}
+
+function processMotionData(tiltX, tiltY) {
 
     // Update display values
     document.getElementById('valX').textContent = tiltX;
