@@ -18,7 +18,7 @@ NRF.setServices({
       description: "Motion XY"
     }
   }
-});
+}, { uart: false, advertise: ["12340001-1234-1234-1234-123456789abc"] });
 
 // Set advertising name so the web app can find us
 NRF.setAdvertising({}, { name: "BangleMotion" });
@@ -88,8 +88,13 @@ function toggleRecording() {
 // Start accelerometer
 Bangle.on('accel', onAccel);
 
-// Button to start/stop
-setWatch(toggleRecording, BTN, { repeat: true, edge: "rising" });
+// Button to start/stop (polling BTN1 since setWatch is unreliable on this unit)
+var btnPressed = false;
+setInterval(function() {
+  var btn = digitalRead(BTN1);
+  if (btn && !btnPressed) toggleRecording();
+  btnPressed = btn;
+}, 200);
 
 // Initial screen
 showScreen("Motion", "Press button", [1, 1, 1]);
