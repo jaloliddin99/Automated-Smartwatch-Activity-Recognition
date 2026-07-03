@@ -254,6 +254,16 @@ async function processCommandQueue() {
     if (!printerConnected || !serialWriter) return;
 
     const cmd = commandQueue.shift();
+
+    // Internal marker: signals init is complete
+    if (cmd === '__INIT_DONE__') {
+        printerInitialized = true;
+        document.getElementById('printerText').textContent = 'Printer: Ready';
+        console.log('Printer initialized and ready!');
+        processCommandQueue();
+        return;
+    }
+
     waitingForOk = true;
 
     // Safety timeout: if no "ok" received within 10 seconds, unstick the queue
@@ -310,12 +320,13 @@ async function initPrinter(withHeating) {
     sendGcodeCommand('G1 Z' + LAYER_HEIGHT.toFixed(1) + ' F1000');
     sendGcodeCommand('G1 X' + (BED_X / 2).toFixed(1) + ' Y' + (BED_Y / 2).toFixed(1) + ' F3000');
 
+    // Mark init complete AFTER all init commands finish (queued in order)
+    sendGcodeCommand('__INIT_DONE__');
+
     totalExtruded = 0;
     lastPrinterX = BED_X / 2;
     lastPrinterY = BED_Y / 2;
-    printerInitialized = true;
-
-    document.getElementById('printerText').textContent = withHeating ? 'Printer: Heating...' : 'Printer: Ready';
+    // printerInitialized will be set to true when __INIT_DONE__ is processed
 }
 
 async function emergencyStop() {
