@@ -503,9 +503,22 @@ function processMotionData(tiltX, tiltY, tiltZ) {
 // RECORDING CONTROLS
 // ============================================
 
+function startHeating() {
+    if (!printerConnected) {
+        alert('Connect printer first');
+        return;
+    }
+    console.log('Sending heating commands directly...');
+    sendGcodeCommand('M104 S200');
+    sendGcodeCommand('M140 S60');
+    document.getElementById('printerText').textContent = 'Printer: Heating...';
+}
+
 function startRecording() {
     isRecording = true;
     currentPath = [];
+
+    console.log('startRecording called, printerConnected:', printerConnected, 'heatToggle:', document.getElementById('heatToggle').checked);
 
     btnRecord.disabled = true;
     btnStop.disabled = false;
