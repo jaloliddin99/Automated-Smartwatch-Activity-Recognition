@@ -171,9 +171,9 @@ async function connectPrinter() {
         printerConnected = true;
         printerReady = true;
 
-        // Poll temperature every 3 seconds
+        // Poll temperature every 3 seconds (only when queue is idle)
         tempPollInterval = setInterval(() => {
-            if (printerConnected && !waitingForOk) {
+            if (printerConnected && !waitingForOk && commandQueue.length === 0) {
                 sendGcodeCommand('M105');
             }
         }, 3000);
@@ -290,17 +290,20 @@ async function initPrinter(withHeating) {
     sendGcodeCommand('G28');  // home all axes
 
     if (withHeating) {
-        // Full init with heating (for actual printing with filament)
-        sendGcodeCommand('M140 S60');    // bed temp
-        sendGcodeCommand('M190 S60');    // wait for bed
-        sendGcodeCommand('M104 S200');   // nozzle temp (PLA)
-        sendGcodeCommand('M109 S200');   // wait for nozzle
+        // Start both heaters simultaneously (don't wait one by one)
+        sendGcodeCommand('M104 S200');   // start nozzle heating (no wait)
+        sendGcodeCommand('M140 S60');    // start bed heating (no wait)
+        sendGcodeCommand('M190 S60');    // now wait for bed temp
+        sendGcodeCommand('M109 S200');   // then wait for nozzle temp
+        // Prime nozzle after heating
         sendGcodeCommand('G1 Z5 F3000');
         sendGcodeCommand('G1 X5 Y5 F3000');
         sendGcodeCommand('G1 Z0.3 F1000');
         sendGcodeCommand('G1 X50 E10 F500');  // prime line
         sendGcodeCommand('G1 Z5 F3000');
         sendGcodeCommand('G92 E0');
+
+        document.getElementById('printerText').textContent = 'Printer: Heating...';
     }
 
     // Move to print height and center
