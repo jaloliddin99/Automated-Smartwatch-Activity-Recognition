@@ -242,40 +242,40 @@ async function processCommandQueue() {
     }
 }
 
-async function initPrinter() {
+async function initPrinter(withHeating) {
     if (!printerConnected) return;
 
     document.getElementById('printerText').textContent = 'Printer: Initializing...';
 
-    // Send setup commands
-    const initCommands = [
-        'G21',         // millimeters
-        'G90',         // absolute positioning
-        'G28',         // home all axes
-        'M140 S60',    // bed temp
-        'M190 S60',    // wait for bed
-        'M104 S200',   // nozzle temp (PLA)
-        'M109 S200',   // wait for nozzle
-        'G1 Z5 F3000', // lift nozzle
-        'G1 X5 Y5 F3000',  // move to corner
-        'G1 Z0.3 F1000',   // lower
-        'G1 X50 E10 F500',  // prime line
-        'G1 Z5 F3000',     // lift
-        'G92 E0',          // reset extruder
-        'G1 Z' + LAYER_HEIGHT.toFixed(1) + ' F1000', // go to print height
-        'G1 X' + (BED_X / 2).toFixed(1) + ' Y' + (BED_Y / 2).toFixed(1) + ' F3000' // go to center
-    ];
+    // Basic setup — always needed
+    sendGcodeCommand('G21');  // millimeters
+    sendGcodeCommand('G90');  // absolute positioning
+    sendGcodeCommand('G28');  // home all axes
 
-    for (const cmd of initCommands) {
-        sendGcodeCommand(cmd);
+    if (withHeating) {
+        // Full init with heating (for actual printing with filament)
+        sendGcodeCommand('M140 S60');    // bed temp
+        sendGcodeCommand('M190 S60');    // wait for bed
+        sendGcodeCommand('M104 S200');   // nozzle temp (PLA)
+        sendGcodeCommand('M109 S200');   // wait for nozzle
+        sendGcodeCommand('G1 Z5 F3000');
+        sendGcodeCommand('G1 X5 Y5 F3000');
+        sendGcodeCommand('G1 Z0.3 F1000');
+        sendGcodeCommand('G1 X50 E10 F500');  // prime line
+        sendGcodeCommand('G1 Z5 F3000');
+        sendGcodeCommand('G92 E0');
     }
+
+    // Move to print height and center
+    sendGcodeCommand('G1 Z' + LAYER_HEIGHT.toFixed(1) + ' F1000');
+    sendGcodeCommand('G1 X' + (BED_X / 2).toFixed(1) + ' Y' + (BED_Y / 2).toFixed(1) + ' F3000');
 
     totalExtruded = 0;
     lastPrinterX = BED_X / 2;
     lastPrinterY = BED_Y / 2;
     printerInitialized = true;
 
-    document.getElementById('printerText').textContent = 'Printer: Ready';
+    document.getElementById('printerText').textContent = withHeating ? 'Printer: Heating...' : 'Printer: Ready';
 }
 
 async function emergencyStop() {
@@ -461,7 +461,8 @@ function startRecording() {
 
     // Initialize printer if connected but not yet initialized
     if (printerConnected && !printerInitialized) {
-        initPrinter();
+        const withHeating = document.getElementById('heatToggle').checked;
+        initPrinter(withHeating);
     }
 }
 
