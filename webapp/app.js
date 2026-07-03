@@ -133,6 +133,14 @@ function onDisconnected() {
 // PRINTER SERIAL CONNECTION (Web Serial API)
 // ============================================
 
+function togglePrinter() {
+    if (printerConnected) {
+        disconnectPrinter();
+    } else {
+        connectPrinter();
+    }
+}
+
 async function connectPrinter() {
     if (!('serial' in navigator)) {
         alert('Web Serial API not supported. Please use Chrome or Edge browser.');
@@ -165,7 +173,8 @@ async function connectPrinter() {
         // Update UI
         document.getElementById('printerStatus').className = 'status-dot dot-green';
         document.getElementById('printerText').textContent = 'Printer: Connected';
-        btnConnectPrinter.textContent = 'Printer Connected';
+        btnConnectPrinter.textContent = 'Disconnect Printer';
+        btnConnectPrinter.disabled = false;
         btnEmergencyStop.disabled = false;
 
         console.log('Printer connected via USB serial!');
@@ -182,6 +191,8 @@ async function connectPrinter() {
     }
 }
 
+let serialBuffer = ''; // buffer for partial serial data
+
 async function readSerialLoop() {
     try {
         while (printerConnected) {
@@ -189,25 +200,28 @@ async function readSerialLoop() {
             if (done) break;
 
             if (value) {
-                const lines = value.split('\n');
+                serialBuffer += value;
+
+                // Process complete lines
+                const lines = serialBuffer.split('\n');
+                serialBuffer = lines.pop(); // keep incomplete line in buffer
+
                 for (const line of lines) {
                     const trimmed = line.trim();
                     if (!trimmed) continue;
 
                     console.log('Printer:', trimmed);
 
-                    // Check for "ok" response
-                    if (trimmed.startsWith('ok')) {
+                    // Check for "ok" response (can be "ok", "ok T:20.0", etc.)
+                    if (trimmed.startsWith('ok') || trimmed === 'start') {
                         waitingForOk = false;
                         processCommandQueue();
                     }
 
-                    // Parse temperature reports
-                    if (trimmed.startsWith('T:')) {
-                        const tempMatch = trimmed.match(/T:([\d.]+)/);
-                        if (tempMatch) {
-                            document.getElementById('printerTemp').textContent = Math.round(parseFloat(tempMatch[1])) + '\u00B0C';
-                        }
+                    // Parse temperature reports (can appear in "ok T:20.0" or standalone "T:20.0")
+                    const tempMatch = trimmed.match(/T:([\d.]+)/);
+                    if (tempMatch) {
+                        document.getElementById('printerTemp').textContent = Math.round(parseFloat(tempMatch[1])) + '\u00B0C';
                     }
                 }
             }
@@ -225,12 +239,27 @@ async function sendGcodeCommand(cmd) {
     processCommandQueue();
 }
 
+let okTimeout = null;
+
 async function processCommandQueue() {
     if (waitingForOk || commandQueue.length === 0) return;
     if (!printerConnected || !serialWriter) return;
 
     const cmd = commandQueue.shift();
     waitingForOk = true;
+
+    // Safety timeout: if no "ok" received within 10 seconds, unstick the queue
+    // (G28 homing and temp waits are excluded — they take longer)
+    if (okTimeout) clearTimeout(okTimeout);
+    if (!cmd.startsWith('G28') && !cmd.startsWith('M109') && !cmd.startsWith('M190')) {
+        okTimeout = setTimeout(() => {
+            if (waitingForOk) {
+                console.warn('Timeout waiting for ok, unsticking queue');
+                waitingForOk = false;
+                processCommandQueue();
+            }
+        }, 10000);
+    }
 
     try {
         await serialWriter.write(cmd + '\n');
@@ -308,6 +337,10 @@ function disconnectPrinter() {
     serialPort = null;
     serialWriter = null;
     serialReader = null;
+    serialBuffer = '';
+    commandQueue = [];
+    waitingForOk = false;
+    if (okTimeout) clearTimeout(okTimeout);
 
     document.getElementById('printerStatus').className = 'status-dot dot-red';
     document.getElementById('printerText').textContent = 'Printer: Disconnected';
