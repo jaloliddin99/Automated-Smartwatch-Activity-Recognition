@@ -27,6 +27,7 @@ let serialReader = null;
 let printerConnected = false;
 let printerReady = false;
 let printerInitialized = false;
+let tempPollInterval = null;  // periodic temperature polling
 let commandQueue = [];
 let waitingForOk = false;
 let totalExtruded = 0;    // running E value for real-time extrusion
@@ -169,6 +170,13 @@ async function connectPrinter() {
 
         printerConnected = true;
         printerReady = true;
+
+        // Poll temperature every 3 seconds
+        tempPollInterval = setInterval(() => {
+            if (printerConnected && !waitingForOk) {
+                sendGcodeCommand('M105');
+            }
+        }, 3000);
 
         // Update UI
         document.getElementById('printerStatus').className = 'status-dot dot-green';
@@ -341,6 +349,7 @@ function disconnectPrinter() {
     commandQueue = [];
     waitingForOk = false;
     if (okTimeout) clearTimeout(okTimeout);
+    if (tempPollInterval) { clearInterval(tempPollInterval); tempPollInterval = null; }
 
     document.getElementById('printerStatus').className = 'status-dot dot-red';
     document.getElementById('printerText').textContent = 'Printer: Disconnected';
@@ -492,8 +501,8 @@ function startRecording() {
     document.getElementById('bleStatus').className = 'status-dot dot-yellow';
     document.getElementById('bleText').textContent = 'Watch: Recording...';
 
-    // Initialize printer if connected but not yet initialized
-    if (printerConnected && !printerInitialized) {
+    // Initialize printer each time recording starts
+    if (printerConnected) {
         const withHeating = document.getElementById('heatToggle').checked;
         initPrinter(withHeating);
     }
@@ -525,6 +534,7 @@ function stopRecording() {
     if (printerConnected && printerInitialized) {
         sendGcodeCommand('G1 Z5 F3000');
     }
+    printerInitialized = false; // re-initialize on next Record
 }
 
 function clearDrawing() {
