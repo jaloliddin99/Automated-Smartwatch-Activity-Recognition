@@ -390,10 +390,12 @@ function processMotionData(tiltX, tiltY, tiltZ) {
     document.getElementById('valZ').textContent = tiltZ;
 
     // Determine pen state from Z-axis
-    // When watch is flat: Z ≈ 100 (gravity pointing down = pen down = drawing)
-    // When watch is raised/tilted: Z drops below threshold = pen up
+    // Bangle.js with face UP: Z ≈ -100 (gravity pulls away from screen)
+    // Bangle.js tilted sideways or flipped: Z rises toward 0 or positive
+    // Pen is DOWN (drawing) when watch face is up (Z < -20)
+    // Pen is UP (not drawing) when watch is tilted/raised (Z > -20)
     currentTiltZ = tiltZ;
-    penDown = tiltZ > 70;
+    penDown = tiltZ < -20;
 
     // Update pen state display
     const penStateEl = document.getElementById('penState');
