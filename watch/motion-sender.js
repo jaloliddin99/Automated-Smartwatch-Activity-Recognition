@@ -11,6 +11,7 @@ Bangle.setLCDTimeout(0); // never turn off
 // Smoothing filter - prevents jitter
 var smoothX = 0;
 var smoothY = 0;
+var smoothZ = 0;
 var alpha = 0.3; // smoothing factor (0 = very smooth, 1 = raw)
 
 function onAccel(data) {
@@ -19,17 +20,19 @@ function onAccel(data) {
   // Apply low-pass filter for smooth movement
   smoothX = alpha * data.x + (1 - alpha) * smoothX;
   smoothY = alpha * data.y + (1 - alpha) * smoothY;
+  smoothZ = alpha * data.z + (1 - alpha) * smoothZ;
 
-  // Ignore tiny movements (dead zone)
+  // Ignore tiny movements (dead zone) for X and Y
   var x = Math.abs(smoothX) < 0.05 ? 0 : smoothX;
   var y = Math.abs(smoothY) < 0.05 ? 0 : smoothY;
 
   // Scale to -100..100 range
   var sendX = Math.round(Math.max(-100, Math.min(100, x * 100)));
   var sendY = Math.round(Math.max(-100, Math.min(100, y * 100)));
+  var sendZ = Math.round(Math.max(-100, Math.min(100, smoothZ * 100)));
 
-  // Send via UART as comma-separated values
-  Bluetooth.println(sendX + "," + sendY);
+  // Send X, Y, Z via UART as comma-separated values
+  Bluetooth.println(sendX + "," + sendY + "," + sendZ);
 }
 
 function showScreen(title, subtitle, color) {
@@ -50,6 +53,7 @@ function toggleRecording() {
   if (recording) {
     smoothX = 0;
     smoothY = 0;
+    smoothZ = 0;
     showScreen("RECORDING", "Tilt to draw", [0, 1, 0]);
     Bangle.buzz(200);
   } else {

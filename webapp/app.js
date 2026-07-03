@@ -1,5 +1,6 @@
 // ============================================
 // Smartwatch Motion → 3D Printer Controller
+// Real-time printing via Web Serial API
 // ============================================
 
 // --- Ultimaker 2+ build area ---
@@ -13,9 +14,34 @@ let bleCharacteristic = null;
 let isRecording = false;
 let cursorX = BED_X / 2; // start at center (mm)
 let cursorY = BED_Y / 2;
-let path = [];           // array of {x, y} points (in mm)
+let penDown = true;       // Z-axis pen state
+let currentTiltZ = 100;   // current Z tilt value
+let path = [];            // array of {x, y} points (in mm)
 let allPaths = [];        // array of completed paths (for undo)
 let currentPath = [];     // current recording segment
+
+// --- Printer Serial State ---
+let serialPort = null;
+let serialWriter = null;
+let serialReader = null;
+let printerConnected = false;
+let printerReady = false;
+let printerInitialized = false;
+let commandQueue = [];
+let waitingForOk = false;
+let totalExtruded = 0;    // running E value for real-time extrusion
+let lastPrinterX = BED_X / 2;
+let lastPrinterY = BED_Y / 2;
+let lastSendTime = 0;
+const SEND_INTERVAL = 80; // ms between G-code commands (throttle)
+const MIN_MOVE_DIST = 0.5; // mm minimum distance to trigger a printer move
+
+// Extrusion constants
+const LAYER_HEIGHT = 0.2;
+const LINE_WIDTH_MM = 0.4;
+const FILAMENT_DIAMETER = 2.85;
+const FILAMENT_AREA = Math.PI * (FILAMENT_DIAMETER / 2) * (FILAMENT_DIAMETER / 2);
+const EXTRUSION_MULTIPLIER = (LAYER_HEIGHT * LINE_WIDTH_MM) / FILAMENT_AREA;
 
 // --- Canvas setup ---
 const canvas = document.getElementById('canvas');
@@ -23,26 +49,32 @@ const ctx = canvas.getContext('2d');
 
 // --- UI elements ---
 const btnConnect = document.getElementById('btnConnect');
+const btnConnectPrinter = document.getElementById('btnConnectPrinter');
 const btnRecord = document.getElementById('btnRecord');
 const btnStop = document.getElementById('btnStop');
 const btnClear = document.getElementById('btnClear');
 const btnExport = document.getElementById('btnExport');
 const btnUndo = document.getElementById('btnUndo');
+const btnEmergencyStop = document.getElementById('btnEmergencyStop');
 const recIndicator = document.getElementById('recIndicator');
 
 // --- Settings ---
-const speedSlider = document.getElementById('speed');
 const lineWidthSlider = document.getElementById('lineWidth');
 
-speedSlider.addEventListener('input', () => {
-    document.getElementById('speedVal').textContent = speedSlider.value;
-});
 lineWidthSlider.addEventListener('input', () => {
     document.getElementById('lineWidthVal').textContent = lineWidthSlider.value;
 });
 
 // ============================================
-// BLE CONNECTION
+// UTILITY
+// ============================================
+
+function mapRange(value, inMin, inMax, outMin, outMax) {
+    return outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
+}
+
+// ============================================
+// BLE CONNECTION (Watch)
 // ============================================
 
 // Nordic UART Service UUIDs (built into Bangle.js)
@@ -73,7 +105,7 @@ async function connectWatch() {
         // Update UI
         document.getElementById('bleStatus').className = 'status-dot dot-green';
         document.getElementById('bleText').textContent = 'Watch: Connected';
-        btnConnect.textContent = 'Connected ✓';
+        btnConnect.textContent = 'Connected';
         btnRecord.disabled = false;
 
         console.log('Connected to Bangle.js!');
@@ -98,6 +130,225 @@ function onDisconnected() {
 }
 
 // ============================================
+// PRINTER SERIAL CONNECTION (Web Serial API)
+// ============================================
+
+async function connectPrinter() {
+    if (!('serial' in navigator)) {
+        alert('Web Serial API not supported. Please use Chrome or Edge browser.');
+        return;
+    }
+
+    try {
+        btnConnectPrinter.textContent = 'Connecting...';
+        btnConnectPrinter.disabled = true;
+
+        // Request serial port (user selects from dialog)
+        serialPort = await navigator.serial.requestPort();
+
+        // Ultimaker 2+ uses 250000 baud by default
+        await serialPort.open({ baudRate: 250000 });
+
+        // Set up writer
+        const encoder = new TextEncoderStream();
+        encoder.readable.pipeTo(serialPort.writable);
+        serialWriter = encoder.writable.getWriter();
+
+        // Set up reader
+        const decoder = new TextDecoderStream();
+        serialPort.readable.pipeTo(decoder.writable);
+        serialReader = decoder.readable.getReader();
+
+        printerConnected = true;
+        printerReady = true;
+
+        // Update UI
+        document.getElementById('printerStatus').className = 'status-dot dot-green';
+        document.getElementById('printerText').textContent = 'Printer: Connected';
+        btnConnectPrinter.textContent = 'Printer Connected';
+        btnEmergencyStop.disabled = false;
+
+        console.log('Printer connected via USB serial!');
+
+        // Start reading printer responses
+        readSerialLoop();
+
+    } catch (error) {
+        console.error('Printer connection failed:', error);
+        btnConnectPrinter.textContent = 'Connect Printer';
+        btnConnectPrinter.disabled = false;
+        document.getElementById('printerStatus').className = 'status-dot dot-red';
+        document.getElementById('printerText').textContent = 'Printer: Failed - ' + error.message;
+    }
+}
+
+async function readSerialLoop() {
+    try {
+        while (printerConnected) {
+            const { value, done } = await serialReader.read();
+            if (done) break;
+
+            if (value) {
+                const lines = value.split('\n');
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+
+                    console.log('Printer:', trimmed);
+
+                    // Check for "ok" response
+                    if (trimmed.startsWith('ok')) {
+                        waitingForOk = false;
+                        processCommandQueue();
+                    }
+
+                    // Parse temperature reports
+                    if (trimmed.startsWith('T:')) {
+                        const tempMatch = trimmed.match(/T:([\d.]+)/);
+                        if (tempMatch) {
+                            document.getElementById('printerTemp').textContent = Math.round(parseFloat(tempMatch[1])) + '\u00B0C';
+                        }
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Serial read error:', error);
+        disconnectPrinter();
+    }
+}
+
+async function sendGcodeCommand(cmd) {
+    if (!printerConnected || !serialWriter) return;
+
+    commandQueue.push(cmd);
+    processCommandQueue();
+}
+
+async function processCommandQueue() {
+    if (waitingForOk || commandQueue.length === 0) return;
+    if (!printerConnected || !serialWriter) return;
+
+    const cmd = commandQueue.shift();
+    waitingForOk = true;
+
+    try {
+        await serialWriter.write(cmd + '\n');
+        console.log('Sent:', cmd);
+    } catch (error) {
+        console.error('Serial write error:', error);
+        waitingForOk = false;
+        disconnectPrinter();
+    }
+}
+
+async function initPrinter() {
+    if (!printerConnected) return;
+
+    document.getElementById('printerText').textContent = 'Printer: Initializing...';
+
+    // Send setup commands
+    const initCommands = [
+        'G21',         // millimeters
+        'G90',         // absolute positioning
+        'G28',         // home all axes
+        'M140 S60',    // bed temp
+        'M190 S60',    // wait for bed
+        'M104 S200',   // nozzle temp (PLA)
+        'M109 S200',   // wait for nozzle
+        'G1 Z5 F3000', // lift nozzle
+        'G1 X5 Y5 F3000',  // move to corner
+        'G1 Z0.3 F1000',   // lower
+        'G1 X50 E10 F500',  // prime line
+        'G1 Z5 F3000',     // lift
+        'G92 E0',          // reset extruder
+        'G1 Z' + LAYER_HEIGHT.toFixed(1) + ' F1000', // go to print height
+        'G1 X' + (BED_X / 2).toFixed(1) + ' Y' + (BED_Y / 2).toFixed(1) + ' F3000' // go to center
+    ];
+
+    for (const cmd of initCommands) {
+        sendGcodeCommand(cmd);
+    }
+
+    totalExtruded = 0;
+    lastPrinterX = BED_X / 2;
+    lastPrinterY = BED_Y / 2;
+    printerInitialized = true;
+
+    document.getElementById('printerText').textContent = 'Printer: Ready';
+}
+
+async function emergencyStop() {
+    if (!printerConnected || !serialWriter) return;
+
+    // Clear queue and send emergency stop immediately
+    commandQueue = [];
+    waitingForOk = false;
+
+    try {
+        await serialWriter.write('M112\n'); // emergency stop
+        await serialWriter.write('M999\n'); // reset after emergency
+    } catch (error) {
+        console.error('Emergency stop error:', error);
+    }
+
+    document.getElementById('printerText').textContent = 'Printer: EMERGENCY STOP';
+    document.getElementById('printerStatus').className = 'status-dot dot-red';
+    printerInitialized = false;
+}
+
+function disconnectPrinter() {
+    printerConnected = false;
+    printerReady = false;
+    printerInitialized = false;
+
+    if (serialPort) {
+        try { serialPort.close(); } catch (e) { /* ignore */ }
+    }
+    serialPort = null;
+    serialWriter = null;
+    serialReader = null;
+
+    document.getElementById('printerStatus').className = 'status-dot dot-red';
+    document.getElementById('printerText').textContent = 'Printer: Disconnected';
+    btnConnectPrinter.textContent = 'Connect Printer';
+    btnConnectPrinter.disabled = false;
+    btnEmergencyStop.disabled = true;
+}
+
+// ============================================
+// REAL-TIME PRINTER MOVEMENT
+// ============================================
+
+function sendPositionToPrinter(x, y, isPenDown) {
+    if (!printerConnected || !printerInitialized) return;
+
+    const now = Date.now();
+    if (now - lastSendTime < SEND_INTERVAL) return; // throttle
+
+    const dx = x - lastPrinterX;
+    const dy = y - lastPrinterY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < MIN_MOVE_DIST) return; // skip tiny moves
+
+    const feedRate = parseInt(document.getElementById('printSpeed').value) || 1500;
+
+    if (isPenDown) {
+        // Extrude while moving
+        totalExtruded += dist * EXTRUSION_MULTIPLIER;
+        sendGcodeCommand('G1 X' + x.toFixed(2) + ' Y' + y.toFixed(2) + ' E' + totalExtruded.toFixed(4) + ' F' + feedRate);
+    } else {
+        // Travel move (no extrusion)
+        sendGcodeCommand('G0 X' + x.toFixed(2) + ' Y' + y.toFixed(2) + ' F3000');
+    }
+
+    lastPrinterX = x;
+    lastPrinterY = y;
+    lastSendTime = now;
+}
+
+// ============================================
 // MOTION DATA HANDLING
 // ============================================
 
@@ -115,29 +366,50 @@ function onUartData(event) {
 
     for (const line of lines) {
         const parts = line.trim().split(',');
-        if (parts.length !== 2) continue;
-        const tiltX = parseInt(parts[0]);
-        const tiltY = parseInt(parts[1]);
-        if (isNaN(tiltX) || isNaN(tiltY)) continue;
-        processMotionData(tiltX, tiltY);
+        // Accept both 2-value (legacy) and 3-value (with Z) formats
+        if (parts.length === 2) {
+            const tiltX = parseInt(parts[0]);
+            const tiltY = parseInt(parts[1]);
+            if (isNaN(tiltX) || isNaN(tiltY)) continue;
+            processMotionData(tiltX, tiltY, 100); // default Z = 100 (flat)
+        } else if (parts.length === 3) {
+            const tiltX = parseInt(parts[0]);
+            const tiltY = parseInt(parts[1]);
+            const tiltZ = parseInt(parts[2]);
+            if (isNaN(tiltX) || isNaN(tiltY) || isNaN(tiltZ)) continue;
+            processMotionData(tiltX, tiltY, tiltZ);
+        }
     }
 }
 
-function processMotionData(tiltX, tiltY) {
+function processMotionData(tiltX, tiltY, tiltZ) {
 
-    // Update display values
+    // Update raw tilt display values
     document.getElementById('valX').textContent = tiltX;
     document.getElementById('valY').textContent = tiltY;
+    document.getElementById('valZ').textContent = tiltZ;
 
-    if (!isRecording) return;
+    // Determine pen state from Z-axis
+    // When watch is flat: Z ≈ 100 (gravity pointing down = pen down = drawing)
+    // When watch is raised/tilted: Z drops below threshold = pen up
+    currentTiltZ = tiltZ;
+    penDown = tiltZ > 70;
 
-    // Convert tilt to movement
-    // Speed factor: how many mm per update per tilt unit
-    const speed = parseFloat(speedSlider.value) * 0.02;
+    // Update pen state display
+    const penStateEl = document.getElementById('penState');
+    if (penDown) {
+        penStateEl.textContent = 'DOWN';
+        penStateEl.style.color = '#44ff44';
+    } else {
+        penStateEl.textContent = 'UP';
+        penStateEl.style.color = '#ff4444';
+    }
 
-    // Update cursor position
-    cursorX += tiltX * speed;
-    cursorY -= tiltY * speed; // inverted: tilt forward = Y increase
+    // Direct position mapping: tilt angle → position on bed
+    // tiltX: -100 (left) to +100 (right) → 5mm to 218mm
+    // tiltY: inverted so tilt forward = cursor moves up on bed
+    cursorX = mapRange(tiltX, -100, 100, 5, BED_X - 5);
+    cursorY = mapRange(-tiltY, -100, 100, 5, BED_Y - 5);
 
     // Clamp to bed boundaries
     cursorX = Math.max(5, Math.min(BED_X - 5, cursorX));
@@ -147,14 +419,25 @@ function processMotionData(tiltX, tiltY) {
     document.getElementById('valPX').textContent = cursorX.toFixed(1);
     document.getElementById('valPY').textContent = cursorY.toFixed(1);
 
-    // Add point to current path
-    currentPath.push({ x: cursorX, y: cursorY });
+    // Send to printer in real-time (always, not just when recording)
+    if (isRecording) {
+        sendPositionToPrinter(cursorX, cursorY, penDown);
+    }
 
-    // Update point count
-    const totalPoints = allPaths.reduce((sum, p) => sum + p.length, 0) + currentPath.length;
-    document.getElementById('pointCount').textContent = 'Points: ' + totalPoints;
+    // Record path on canvas
+    if (isRecording && penDown) {
+        currentPath.push({ x: cursorX, y: cursorY });
 
-    // Redraw
+        // Update point count
+        const totalPoints = allPaths.reduce((sum, p) => sum + p.length, 0) + currentPath.length;
+        document.getElementById('pointCount').textContent = 'Points: ' + totalPoints;
+    } else if (isRecording && !penDown && currentPath.length > 1) {
+        // Pen lifted — save current segment, start a new one when pen comes down
+        allPaths.push([...currentPath]);
+        currentPath = [];
+    }
+
+    // Redraw canvas
     drawCanvas();
 }
 
@@ -164,7 +447,7 @@ function processMotionData(tiltX, tiltY) {
 
 function startRecording() {
     isRecording = true;
-    currentPath = [{ x: cursorX, y: cursorY }];
+    currentPath = [];
 
     btnRecord.disabled = true;
     btnStop.disabled = false;
@@ -173,6 +456,11 @@ function startRecording() {
 
     document.getElementById('bleStatus').className = 'status-dot dot-yellow';
     document.getElementById('bleText').textContent = 'Watch: Recording...';
+
+    // Initialize printer if connected but not yet initialized
+    if (printerConnected && !printerInitialized) {
+        initPrinter();
+    }
 }
 
 function stopRecording() {
@@ -195,6 +483,11 @@ function stopRecording() {
     if (bleCharacteristic) {
         document.getElementById('bleStatus').className = 'status-dot dot-green';
         document.getElementById('bleText').textContent = 'Watch: Connected';
+    }
+
+    // Lift printer nozzle when stopping
+    if (printerConnected && printerInitialized) {
+        sendGcodeCommand('G1 Z5 F3000');
     }
 }
 
@@ -280,6 +573,12 @@ function drawGrid() {
     ctx.lineTo(CANVAS_SIZE, center);
     ctx.stroke();
 
+    // Axis labels
+    ctx.fillStyle = '#445';
+    ctx.font = '12px monospace';
+    ctx.fillText('X', CANVAS_SIZE - 15, CANVAS_SIZE / 2 - 5);
+    ctx.fillText('Y', CANVAS_SIZE / 2 + 5, 15);
+
     // Border
     ctx.strokeStyle = '#334';
     ctx.lineWidth = 2;
@@ -329,21 +628,23 @@ function drawCursor() {
     const cx = cursorX * scale;
     const cy = (BED_Y - cursorY) * scale;
 
-    // Outer ring
-    ctx.strokeStyle = isRecording ? '#ff0000' : '#ffffff';
+    // Outer ring — color shows pen state
+    const cursorColor = !isRecording ? '#ffffff' : (penDown ? '#44ff44' : '#ff4444');
+    ctx.strokeStyle = cursorColor;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.arc(cx, cy, 10, 0, Math.PI * 2);
     ctx.stroke();
 
     // Center dot
-    ctx.fillStyle = isRecording ? '#ff0000' : '#ffffff';
+    ctx.fillStyle = cursorColor;
     ctx.beginPath();
     ctx.arc(cx, cy, 3, 0, Math.PI * 2);
     ctx.fill();
 
     // Crosshair lines
-    ctx.strokeStyle = isRecording ? 'rgba(255,0,0,0.3)' : 'rgba(255,255,255,0.2)';
+    ctx.globalAlpha = 0.2;
+    ctx.strokeStyle = cursorColor;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(cx, 0);
@@ -353,17 +654,17 @@ function drawCursor() {
     ctx.moveTo(0, cy);
     ctx.lineTo(CANVAS_SIZE, cy);
     ctx.stroke();
+    ctx.globalAlpha = 1.0;
 }
 
 // ============================================
-// G-CODE EXPORT
+// G-CODE EXPORT (file download — fallback)
 // ============================================
 
 function exportGcode() {
     if (allPaths.length === 0) return;
 
     const feedRate = parseInt(document.getElementById('printSpeed').value) || 1500;
-    const zHeight = 1; // draw at 1mm height (pen just touches bed)
 
     let gcode = [];
 
@@ -401,7 +702,7 @@ function exportGcode() {
     let totalE = 0; // extruder position
     const layerHeight = 0.2;
     const lineWidthMM = 0.4;
-    const filamentDiameter = 2.85; // Ultimaker 2+ uses 2.85mm filament
+    const filamentDiameter = 2.85;
     const filamentArea = Math.PI * (filamentDiameter / 2) * (filamentDiameter / 2);
     const extrusionMultiplier = (layerHeight * lineWidthMM) / filamentArea;
 
@@ -458,7 +759,6 @@ function exportGcode() {
 function simplifyPath(points, tolerance) {
     if (points.length <= 2) return points;
 
-    // Find point with max distance from line between first and last
     let maxDist = 0;
     let maxIndex = 0;
 
@@ -497,14 +797,13 @@ function perpendicularDistance(point, lineStart, lineEnd) {
 }
 
 // ============================================
-// DEMO MODE (for testing without watch)
+// DEMO MODE (mouse drawing for testing)
 // ============================================
 
-// Allow mouse drawing for testing
 let mouseDown = false;
 
 canvas.addEventListener('mousedown', (e) => {
-    if (bleCharacteristic) return; // use watch if connected
+    if (bleCharacteristic) return;
     mouseDown = true;
     const rect = canvas.getBoundingClientRect();
     const scale = BED_X / CANVAS_SIZE;
@@ -512,6 +811,7 @@ canvas.addEventListener('mousedown', (e) => {
     cursorY = BED_Y - (e.clientY - rect.top) * scale;
     currentPath = [{ x: cursorX, y: cursorY }];
     isRecording = true;
+    penDown = true;
     recIndicator.style.display = 'block';
     drawCanvas();
 });
@@ -527,6 +827,9 @@ canvas.addEventListener('mousemove', (e) => {
     document.getElementById('valPY').textContent = cursorY.toFixed(1);
 
     currentPath.push({ x: cursorX, y: cursorY });
+
+    // Also send to printer in real-time during mouse drawing
+    sendPositionToPrinter(cursorX, cursorY, true);
 
     const totalPoints = allPaths.reduce((sum, p) => sum + p.length, 0) + currentPath.length;
     document.getElementById('pointCount').textContent = 'Points: ' + totalPoints;

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Smartwatch Motion → 3D Printer</title>
+    <title>Smartwatch Motion to 3D Printer</title>
     <style>
         * {
             margin: 0;
@@ -83,11 +83,13 @@
         button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
         .btn-connect { background: #00d4ff; color: #000; }
+        .btn-printer { background: #ff8800; color: #000; }
         .btn-record { background: #44ff44; color: #000; }
         .btn-stop { background: #ff4444; color: #fff; }
         .btn-clear { background: #666; color: #fff; }
-        .btn-export { background: #ff8800; color: #000; }
-        .btn-undo { background: #aa66ff; color: #fff; }
+        .btn-export { background: #aa66ff; color: #fff; }
+        .btn-undo { background: #888; color: #fff; }
+        .btn-emergency { background: #ff0000; color: #fff; font-size: 0.85em; }
 
         .canvas-container {
             position: relative;
@@ -120,7 +122,7 @@
 
         .data-panel {
             display: flex;
-            gap: 20px;
+            gap: 15px;
             margin-top: 15px;
             flex-wrap: wrap;
             justify-content: center;
@@ -128,23 +130,31 @@
 
         .data-box {
             background: #16213e;
-            padding: 12px 20px;
+            padding: 10px 16px;
             border-radius: 8px;
             text-align: center;
-            min-width: 100px;
+            min-width: 80px;
         }
 
         .data-label {
             color: #888;
-            font-size: 0.75em;
+            font-size: 0.7em;
             text-transform: uppercase;
         }
 
         .data-value {
-            font-size: 1.4em;
+            font-size: 1.3em;
             font-weight: bold;
             font-family: monospace;
             color: #00d4ff;
+        }
+
+        .data-value.pen-up {
+            color: #ff4444;
+        }
+
+        .data-value.pen-down {
+            color: #44ff44;
         }
 
         .settings {
@@ -184,10 +194,11 @@
             padding: 15px;
             background: #16213e;
             border-radius: 8px;
-            max-width: 600px;
+            max-width: 620px;
             font-size: 0.8em;
             color: #aaa;
             line-height: 1.6;
+            margin-bottom: 30px;
         }
 
         .instructions h3 {
@@ -197,6 +208,13 @@
 
         .instructions ol {
             padding-left: 20px;
+        }
+
+        .instructions .section-title {
+            color: #ff8800;
+            font-weight: bold;
+            margin-top: 10px;
+            margin-bottom: 4px;
         }
 
         .recording-indicator {
@@ -222,12 +240,16 @@
 </head>
 <body>
     <h1>Smartwatch Motion to 3D Printer</h1>
-    <p class="subtitle">Draw in the air with your hand → Print the drawing</p>
+    <p class="subtitle">Move your hand on a flat surface — prints in real-time</p>
 
     <div class="status-bar">
         <div class="status-item">
             <span class="status-dot dot-red" id="bleStatus"></span>
             <span id="bleText">Watch: Disconnected</span>
+        </div>
+        <div class="status-item">
+            <span class="status-dot dot-red" id="printerStatus"></span>
+            <span id="printerText">Printer: Disconnected</span>
         </div>
         <div class="status-item">
             <span id="pointCount">Points: 0</span>
@@ -236,11 +258,13 @@
 
     <div class="controls">
         <button class="btn-connect" id="btnConnect" onclick="connectWatch()">Connect Watch</button>
+        <button class="btn-printer" id="btnConnectPrinter" onclick="connectPrinter()">Connect Printer</button>
         <button class="btn-record" id="btnRecord" onclick="startRecording()" disabled>Record</button>
         <button class="btn-stop" id="btnStop" onclick="stopRecording()" disabled>Stop</button>
         <button class="btn-undo" id="btnUndo" onclick="undoLast()" disabled>Undo</button>
         <button class="btn-clear" id="btnClear" onclick="clearDrawing()" disabled>Clear</button>
         <button class="btn-export" id="btnExport" onclick="exportGcode()" disabled>Export G-code</button>
+        <button class="btn-emergency" id="btnEmergencyStop" onclick="emergencyStop()" disabled>STOP</button>
     </div>
 
     <div class="canvas-container">
@@ -251,7 +275,7 @@
         <div class="printer-bounds">
             Ultimaker 2+<br>Build area shown
         </div>
-        <div class="recording-indicator" id="recIndicator">● RECORDING</div>
+        <div class="recording-indicator" id="recIndicator">RECORDING</div>
     </div>
 
     <div class="data-panel">
@@ -264,19 +288,28 @@
             <div class="data-value" id="valY">0</div>
         </div>
         <div class="data-box">
-            <div class="data-label">Cursor X (mm)</div>
+            <div class="data-label">Tilt Z</div>
+            <div class="data-value" id="valZ">0</div>
+        </div>
+        <div class="data-box">
+            <div class="data-label">Pen</div>
+            <div class="data-value" id="penState">--</div>
+        </div>
+        <div class="data-box">
+            <div class="data-label">X (mm)</div>
             <div class="data-value" id="valPX">111</div>
         </div>
         <div class="data-box">
-            <div class="data-label">Cursor Y (mm)</div>
+            <div class="data-label">Y (mm)</div>
             <div class="data-value" id="valPY">111</div>
+        </div>
+        <div class="data-box">
+            <div class="data-label">Nozzle</div>
+            <div class="data-value" id="printerTemp">--</div>
         </div>
     </div>
 
     <div class="settings">
-        <label>Speed: <input type="range" id="speed" min="1" max="10" value="5">
-            <span id="speedVal">5</span>
-        </label>
         <label>Line width: <input type="range" id="lineWidth" min="1" max="5" value="2">
             <span id="lineWidthVal">2</span>
         </label>
@@ -285,15 +318,35 @@
 
     <div class="instructions">
         <h3>How to Use</h3>
+
+        <p class="section-title">Watch Setup</p>
         <ol>
             <li>Upload <code>watch/motion-sender.js</code> to your Bangle.js using the <a href="https://www.espruino.com/ide/" target="_blank" style="color:#00d4ff">Espruino Web IDE</a></li>
-            <li>Press the button on the watch to start sending motion data</li>
-            <li>Click <strong>Connect Watch</strong> above and select "BangleMotion"</li>
-            <li>Click <strong>Record</strong> and tilt your hand to draw</li>
-            <li>Click <strong>Stop</strong> when done</li>
-            <li>Click <strong>Export G-code</strong> to download the file</li>
-            <li>Copy the .gcode file to SD card and load on Ultimaker 2+</li>
+            <li>Click <strong>Connect Watch</strong> and select your Bangle.js</li>
+            <li>Press the button on the watch to start sending data</li>
         </ol>
+
+        <p class="section-title">Printer Setup (USB)</p>
+        <ol>
+            <li>Connect Ultimaker 2+ to your computer with a USB cable</li>
+            <li>Click <strong>Connect Printer</strong> and select the serial port</li>
+            <li>The printer will home and heat up automatically when you hit Record</li>
+        </ol>
+
+        <p class="section-title">Drawing</p>
+        <ol>
+            <li>Click <strong>Record</strong> — tilt your hand to move the cursor</li>
+            <li>Hold watch <strong>flat</strong> = pen DOWN (draws/extrudes)</li>
+            <li>Raise/tilt watch <strong>up</strong> = pen UP (moves without drawing)</li>
+            <li>X axis = left/right, Y axis = forward/back, Z axis = up (sky)</li>
+            <li>Click <strong>Stop</strong> when done</li>
+            <li>Use <strong>Export G-code</strong> to download as file (fallback for SD card)</li>
+        </ol>
+
+        <p style="margin-top:10px; color:#666; font-size:0.9em">
+            No watch? Draw with your mouse on the canvas to test.
+            Printer connection requires Chrome or Edge browser.
+        </p>
     </div>
 
     <script src="app.js"></script>
